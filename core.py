@@ -90,23 +90,99 @@ class Client:
         self._install_throttle(getattr(cfg, "delay", 0.0) or 0.0)
 
     def _install_throttle(self, delay: float):
-        """Wrap the session so every request honours a min inter-request delay
-        and automatically backs off on HTTP 429 (Too Many Requests)."""
-        self.delay = delay
+        """Wrap the session with an **adaptive** throttle.
+
+        * Honours a minimum inter-request delay (starts at *delay*).
+        * Reads ``X-RateLimit-Remaining`` / ``X-RateLimit-Reset`` headers
+          from the upstream proxy and preemptively slows down when quota
+          is almost exhausted.
+        * On HTTP 429 the base delay is **automatically increased** (×1.5,
+          capped at 30 s) so subsequent requests don't immediately re-trip
+          the limiter.
+        * After 10 consecutive successes the delay **decays** (×0.9) back
+          toward the user-configured floor.
+        """
+        self._min_delay = delay           # user-configured floor
+        self.delay = delay                # current adaptive delay
         self._last_req = 0.0
+        self._ok_streak = 0               # consecutive non-429 responses
         _orig = self.s.request
 
+        def _rl_hints(resp):
+            """Return (remaining, reset) from X-RateLimit-* headers."""
+            remaining = resp.headers.get("X-RateLimit-Remaining")
+            reset = resp.headers.get("X-RateLimit-Reset")
+            return remaining, reset
+
+        def _reset_seconds(raw):
+            """Parse a Reset header value into seconds-from-now."""
+            try:
+                val = float(raw)
+            except (TypeError, ValueError):
+                return None
+            if val > 1e9:                 # Unix timestamp
+                return max(val - time.time(), 0.5)
+            return max(val, 0.5)          # already a duration
+
         def throttled(method, url, **kw):
+            # --- pre-request delay ---
             if self.delay:
                 wait = self.delay - (time.time() - self._last_req)
                 if wait > 0:
                     time.sleep(wait)
+
             resp = _orig(method, url, **kw)
             self._last_req = time.time()
+
+            # --- successful response: learn from rate-limit headers ---
+            if resp.status_code != 429:
+                self._ok_streak += 1
+                remaining, reset = _rl_hints(resp)
+
+                # Preemptively slow down when quota is almost gone
+                if remaining is not None:
+                    try:
+                        rem = int(remaining)
+                        if rem <= 2:
+                            self.delay = max(self.delay, self._min_delay or 0.5) * 1.5
+                        elif rem <= 5:
+                            self.delay = max(self.delay, self._min_delay or 0.5) * 1.2
+                    except ValueError:
+                        pass
+
+                # Use the reset window to space requests optimally
+                if remaining is not None and reset is not None:
+                    try:
+                        rem = int(remaining)
+                        secs = _reset_seconds(reset)
+                        if rem <= 2 and secs and secs < 60:
+                            self.delay = max(self.delay, secs / max(rem, 1))
+                    except ValueError:
+                        pass
+
+                # Decay delay after sustained success
+                if self._ok_streak >= 10 and self.delay > self._min_delay:
+                    self.delay = max(self._min_delay, self.delay * 0.9)
+                    self._ok_streak = 0
+                return resp
+
+            # --- 429: back off and retry ---
+            self._ok_streak = 0
             tries = 0
             while resp.status_code == 429 and tries < 6:
+                # Bump the base delay for *future* requests too
+                self.delay = min(max(self.delay, self._min_delay or 0.5) * 1.5, 30)
+
+                # Decide how long to sleep for *this* retry
                 ra = resp.headers.get("Retry-After", "")
-                back = float(ra) if ra.replace(".", "", 1).isdigit() else max(self.delay * 2, 1.0) * (tries + 1)
+                _, reset = _rl_hints(resp)
+                if ra and ra.replace(".", "", 1).isdigit():
+                    back = float(ra)
+                elif reset is not None:
+                    back = _reset_seconds(reset) or self.delay * (tries + 1)
+                else:
+                    back = self.delay * (tries + 1)
+
                 time.sleep(min(back, 30))
                 resp = _orig(method, url, **kw)
                 self._last_req = time.time()
