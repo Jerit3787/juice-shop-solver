@@ -54,12 +54,16 @@ class Config:
         p.add_argument("--no-verify", action="store_true", help="skip the before/after solved-status diff")
         p.add_argument("--browser", action="store_true",
                        help="also run the Selenium browser solver for client-side challenges")
+        p.add_argument("--delay", type=float, default=float(os.getenv("JS_DELAY", "0")),
+                       help="minimum seconds between requests, to stay under a rate limiter "
+                            "(e.g. the CAIDPS proxy). Default 0.")
         args, _ = p.parse_known_args(argv)
         cfg = cls(protocol=args.protocol, hostname=args.hostname, port=args.port)
         cfg.only = args.only          # type: ignore[attr-defined]
         cfg.list = args.list          # type: ignore[attr-defined]
         cfg.verify = not args.no_verify  # type: ignore[attr-defined]
         cfg.browser = args.browser    # type: ignore[attr-defined]
+        cfg.delay = args.delay        # type: ignore[attr-defined]
         return cfg
 
 
@@ -81,6 +85,35 @@ class Client:
         self.token: Optional[str] = None
         self.bid: Optional[int] = None       # basket id of the logged-in user
         self.email: Optional[str] = None
+        # Throttle + 429 backoff so we stay under an upstream rate limiter
+        # (e.g. the CAIDPS proxy's sliding-window limit).
+        self._install_throttle(getattr(cfg, "delay", 0.0) or 0.0)
+
+    def _install_throttle(self, delay: float):
+        """Wrap the session so every request honours a min inter-request delay
+        and automatically backs off on HTTP 429 (Too Many Requests)."""
+        self.delay = delay
+        self._last_req = 0.0
+        _orig = self.s.request
+
+        def throttled(method, url, **kw):
+            if self.delay:
+                wait = self.delay - (time.time() - self._last_req)
+                if wait > 0:
+                    time.sleep(wait)
+            resp = _orig(method, url, **kw)
+            self._last_req = time.time()
+            tries = 0
+            while resp.status_code == 429 and tries < 6:
+                ra = resp.headers.get("Retry-After", "")
+                back = float(ra) if ra.replace(".", "", 1).isdigit() else max(self.delay * 2, 1.0) * (tries + 1)
+                time.sleep(min(back, 30))
+                resp = _orig(method, url, **kw)
+                self._last_req = time.time()
+                tries += 1
+            return resp
+
+        self.s.request = throttled
 
     # -- low level -------------------------------------------------------- #
     def url(self, path: str) -> str:
