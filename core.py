@@ -74,6 +74,10 @@ class Client:
         self.base = cfg.base
         self.s = requests.Session()
         self.s.verify = False
+        # Request uncompressed responses: reverse proxies (e.g. the CAIDPS proxy)
+        # sometimes forward a `Content-Encoding: gzip` header while rewriting the
+        # body to plaintext, which breaks client-side gzip decoding.
+        self.s.headers.update({"Accept-Encoding": "identity"})
         self.token: Optional[str] = None
         self.bid: Optional[int] = None       # basket id of the logged-in user
         self.email: Optional[str] = None
