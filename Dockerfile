@@ -1,13 +1,14 @@
-FROM python:2-slim
+FROM python:3.12-slim
 
 WORKDIR /usr/src/app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+# core solver deps only; the --browser (Selenium) path needs a Chrome image instead
+RUN pip install --no-cache-dir requests pyotp pyzmq hashids "python-socketio[client]"
 
 COPY . .
 
-ENTRYPOINT [ "python", "./solutions.py" ]
-#CMD ["--protocol", "http", "--hostname", "localhost", "--port", "3000"]
-CMD ["--help"]
-
+ENTRYPOINT [ "python", "./solve.py" ]
+# Override the target with e.g.:
+#   docker run --rm juice-shop-solver --host host.docker.internal --port 3000
+CMD ["--host", "host.docker.internal", "--port", "3000"]

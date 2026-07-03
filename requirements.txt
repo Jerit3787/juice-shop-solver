@@ -1,5 +1,11 @@
-hashids>=1.1.0
-requests>=2.11.1
-zmq>=0.0.0
-selenium>=3.0.2
-argparse
+# Core (required)
+requests>=2.31.0
+pyotp>=2.9.0            # TOTP for the 2FA challenge
+pyzmq>=25.0.0          # Z85 codec for the forged-coupon challenge
+hashids>=1.3.1         # continue-code forgery
+
+# WebSocket-driven challenges (localXss, xssBonus, svgInjection, closeNotifications)
+python-socketio[client]>=5.11.0
+
+# Browser-driven SPA-route challenges (optional; used with --browser)
+selenium>=4.20.0

